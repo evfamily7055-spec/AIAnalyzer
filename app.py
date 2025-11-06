@@ -172,9 +172,10 @@ if uploaded_file:
                 schema[col]["unique_values"] = unique_vals
             elif pd.api.types.is_numeric_dtype(df[col]):
                  try:
-                     schema[col]["mean"] = df[col].mean()
-                     schema[col]["min"] = df[col].min()
-                     schema[col]["max"] = df[col].max()
+                     # (FIX) JSONシリアライズエラーを防ぐため、Python標準のfloat/intに変換
+                     schema[col]["mean"] = float(df[col].mean())
+                     schema[col]["min"] = float(df[col].min())
+                     schema[col]["max"] = float(df[col].max())
                  except Exception:
                      pass 
                  
