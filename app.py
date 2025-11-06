@@ -4,6 +4,7 @@ import io
 import json
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
+import traceback
 
 # グラフ描画ライブラリ
 import plotly.express as px
@@ -17,7 +18,6 @@ try:
     JANOME_AVAILABLE = True
 except ImportError:
     JANOME_AVAILABLE = False
-    # st.error("Janomeライブラリが見つかりません。テキストマイニング機能は無効です。")
 
 # 統計的仮説検定ライブラリ
 try:
@@ -26,16 +26,14 @@ try:
     STATS_LIBS_AVAILABLE = True
 except ImportError:
     STATS_LIBS_AVAILABLE = False
-    # st.error("ScipyまたはStatsmodelsが見つかりません。統計検定機能は無効です。")
-
 
 # --- 定数 (Constants) ---
 MAX_UNIQUE_VALUES_FOR_SCHEMA = 20
 
 # --- ページ設定 (Page Config) ---
 st.set_page_config(layout="wide")
-st.title("AIデータアナリスト (統計検定・NLP・解説対応) 🔬")
-st.info("集計・可視化・テキストマイニング・統計検定を実行し、論文用の「分析内容の解説」もAIが自動生成します。")
+st.title("AIデータアナリスト (ワンクリック実行) 🚀")
+st.info("集計・可視化・テキストマイニング・統計検定・論文用解説の生成まで、AIがワンクリックで実行します。")
 
 # --- セッションステートの初期化 (Initialize Session State) ---
 if 'df' not in st.session_state:
@@ -50,6 +48,8 @@ if 'analysis_explanation' not in st.session_state:
     st.session_state.analysis_explanation = "" 
 if 'statistical_interpretation' not in st.session_state:
     st.session_state.statistical_interpretation = ""
+if 'last_uploaded_filename' not in st.session_state:
+    st.session_state.last_uploaded_filename = None
 
 # --- Gemini API 呼び出し関数 ---
 @st.cache_data(ttl=600) 
@@ -64,7 +64,6 @@ def generate_code_and_explanation(schema_json: str, user_prompt: str, api_key: s
         st.error(f"APIキーの設定に失敗しました: {e}")
         return None
 
-    # (NEW) AIへの指示（システムプロンプト）をJSON出力・NLP・統計検定対応に超強化
     system_prompt = (
         "あなたは、Pandas, Plotly (px), Janome (NLP), Scipy (stats), Statsmodels (sm) を専門とする世界クラスのPythonデータアナリストです。"
         "あなたの仕事は、渡された「データスキーマ」と「ユーザーの曖昧な指示」から、「実行コード」「分析内容の日本語説明」「統計的解釈」の3つを *JSON形式* で生成することです。"
@@ -80,19 +79,17 @@ def generate_code_and_explanation(schema_json: str, user_prompt: str, api_key: s
         "2. `code_to_execute` のルール:"
         "   - 入力データフレームは *常に* `df` という名前です。"
         "   - ユーザーの指示から、集計(Pandas), グラフ(Plotly as px), NLP(Janome), 統計検定(scipy.stats as stats, statsmodels.api as sm) のどれが最適か *推論* してください。"
-        "   - (STABILITY FIX) グラフ描画時 (px.pie, px.bar など) 、`template` のような外観に関するオプションは *絶対* に指定しないでください。デフォルトのスタイルを使ってください。"
+        "   - (STABILITY) グラフ描画時 (px.pie, px.bar など) 、`template` のような外観に関するオプションは *絶対* に指定しないでください。デフォルトのスタイルを使ってください。"
         "   - コードの *最終行* は、結果（DataFrame, Series, Plotly Figure, または検定結果の文字列/DataFrame）を `output` という単一の変数に *必ず* 代入してください。"
         "   - `print()` や `fig.show()` 文は *絶対に* 使わないでください。"
         
         "3. `analysis_explanation` のルール:"
         "   - `code_to_execute` で実行する分析が *何をしているか* を、学術論文の「方法」セクションで使える、客観的かつ簡潔な日本語で説明してください。"
         "   - （例: 「'Gender' 列をグループ化キーとし、'Age' 列の平均値を算出した。」）"
-        "   - （例: 「'Age' 列をX軸、'Income' 列をY軸とする散布図を作成し、両変数の関係性を可視化した。」）"
 
         "4. `statistical_interpretation` のルール:"
         "   - *統計検定を実行した場合のみ*、その結果（p値、統計量など）を論文の「結果」セクションで使えるように日本語で解釈してください。"
         "   - （例: 「t検定の結果、p値は0.03であり、5%水準で有意な差が認められた。」）"
-        "   - （例: 「相関分析の結果、r=0.75, p<0.01 であり、強い正の相関が認められた。」）"
         "   - *統計検定でない場合（単純集計やグラフ描画）は、このフィールドは空文字列 \"\" としてください。*"
 
         "5. 統計検定の指示（例: 「差があるか検定」「関連を分析」「相関を調べて」）の場合:"
@@ -107,10 +104,7 @@ def generate_code_and_explanation(schema_json: str, user_prompt: str, api_key: s
         "   - `stop_words` (例: 'する', 'ある', 'ない', 'こと', 'もの') を定義し、除外。"
         "   - 単語頻度をカウントし、上位50件を `pd.DataFrame(..., columns=['word', 'count'])` に格納。"
         "   - 最後に `px.treemap` を使用し、`path=[px.Constant('all'), 'word']`, `values='count'` で結果を可視化し、それを `output` に代入。"
-        
-        "7. 曖昧な指示（例: '男女別'）は、スキーマの `unique_values` などを参照し、*積極的に推論* してください。"
     )
-
 
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash-preview-09-2025",
@@ -135,7 +129,7 @@ def generate_code_and_explanation(schema_json: str, user_prompt: str, api_key: s
         st.error(f"APIキーが無効、または設定が正しくありません: {e}")
         return None
     except Exception as e:
-        st.error(f"Gemini API 呼び出し中に予期せぬエラーが発生しました: {e}")
+        st.error(f"Gemini API 呼び出し中に予期せぬエラーが発生しました: {e}\n{traceback.format_exc()}")
         return None
 
 # --- サイドバー (APIキー入力) ---
@@ -149,48 +143,52 @@ with st.sidebar:
     if not STATS_LIBS_AVAILABLE:
         st.error("ScipyまたはStatsmodelsが見つかりません。統計検定機能は無効です。\n`pip install scipy statsmodels` を実行してください。")
 
-
 # --- 1. ファイルアップローダー ---
 uploaded_file = st.file_uploader("Excelファイル (.xlsx) をアップロードしてください", type=["xlsx"])
 
-if uploaded_file:
-    try:
-        bytes_data = uploaded_file.getvalue()
-        df = pd.read_excel(io.BytesIO(bytes_data))
-        
-        st.session_state.df = df 
-        
-        schema = {}
-        for col in df.columns:
-            dtype = str(df[col].dtype)
-            schema[col] = {"dtype": dtype}
+# (BUG FIX) 
+# uploaded_file オブジェクトがNoneでなく、
+# かつ「ファイル名が前回と異なる」場合にのみ、DFの読み込みと状態のリセットを実行する
+if uploaded_file is not None:
+    if uploaded_file.name != st.session_state.last_uploaded_filename:
+        try:
+            st.info(f"'{uploaded_file.name}' を読み込んでいます...")
+            bytes_data = uploaded_file.getvalue()
+            df = pd.read_excel(io.BytesIO(bytes_data))
             
-            if dtype == 'object' and df[col].nunique() <= MAX_UNIQUE_VALUES_FOR_SCHEMA:
-                unique_vals = df[col].dropna().unique().tolist()
-                schema[col]["unique_values"] = unique_vals
-            elif pd.api.types.is_numeric_dtype(df[col]):
-                 try:
-                     # (FIX) JSONシリアライズエラーを防ぐため、Python標準のfloat/intに変換
-                     schema[col]["mean"] = float(df[col].mean())
-                     schema[col]["min"] = float(df[col].min())
-                     schema[col]["max"] = float(df[col].max())
-                 except Exception:
-                     pass 
-                 
-        st.session_state.schema_dict = schema
-        
-        st.success("ファイルの読み込みが完了しました。")
-        
-        # 状態をリセット
-        st.session_state.generated_code = ""
-        st.session_state.exec_output = None 
-        st.session_state.analysis_explanation = ""
-        st.session_state.statistical_interpretation = ""
+            st.session_state.df = df 
+            st.session_state.last_uploaded_filename = uploaded_file.name # (FIX) ファイル名を記憶
+            
+            # 拡張スキーマの生成
+            schema = {}
+            for col in df.columns:
+                dtype = str(df[col].dtype)
+                schema[col] = {"dtype": dtype}
+                
+                if dtype == 'object' and df[col].nunique() <= MAX_UNIQUE_VALUES_FOR_SCHEMA:
+                    unique_vals = df[col].dropna().unique().tolist()
+                    schema[col]["unique_values"] = unique_vals
+                elif pd.api.types.is_numeric_dtype(df[col]):
+                     try:
+                         schema[col]["mean"] = float(df[col].mean())
+                         schema[col]["min"] = float(df[col].min())
+                         schema[col]["max"] = float(df[col].max())
+                     except Exception:
+                         pass 
+                     
+            st.session_state.schema_dict = schema
+            st.success(f"ファイルの読み込みが完了しました。 (行: {len(df)}, 列: {len(df.columns)})")
+            
+            # (FIX) 状態をリセット
+            st.session_state.generated_code = ""
+            st.session_state.exec_output = None 
+            st.session_state.analysis_explanation = ""
+            st.session_state.statistical_interpretation = ""
 
-    except Exception as e:
-        st.error(f"Excelファイルの読み込みに失敗しました: {e}")
-        st.session_state.df = None
-
+        except Exception as e:
+            st.error(f"Excelファイルの読み込みに失敗しました: {e}")
+            st.session_state.df = None
+            st.session_state.last_uploaded_filename = None
 
 # --- 2. メインの作業領域 (左右分割) ---
 if st.session_state.df is not None:
@@ -200,7 +198,7 @@ if st.session_state.df is not None:
 
     # --- 左カラム (col1): AIへの指示と実行（作業領域） ---
     with col1:
-        st.header("Step 1: AIへの指示")
+        st.header("Step 1: AIへの分析指示")
         st.write("右側でデータ（列名）を確認しながら、実行したい内容を日本語で指示してください。")
         
         user_prompt = st.text_area(
@@ -215,7 +213,8 @@ if st.session_state.df is not None:
             height=150
         )
 
-        if st.button("🤖 AIコード生成", type="primary"):
+        # (UX CHANGE) ボタンを「分析を実行」に変更
+        if st.button("🤖 分析を実行", type="primary"):
             if not api_key:
                 st.error("サイドバーからGemini APIキーを入力してください。")
             elif not user_prompt:
@@ -229,33 +228,27 @@ if st.session_state.df is not None:
                  st.error("統計検定にはScipyとStatsmodelsが必要です。サイドバーのエラーメッセージを確認してください。")
                  st.stop()
             
-            with st.spinner("AIがコードと解説を生成中です..."):
-                schema_json = json.dumps(st.session_state.schema_dict, indent=2, ensure_ascii=False)
-                response_data = generate_code_and_explanation(schema_json, user_prompt, api_key)
-                
-                if response_data:
+            # --- (NEW) ワンクリックで「生成」と「実行」を両方行う ---
+            else:
+                with st.spinner("AIがコードを生成し、サーバー上で実行中です..."):
+                    # 1. AIコード生成
+                    schema_json = json.dumps(st.session_state.schema_dict, indent=2, ensure_ascii=False)
+                    response_data = generate_code_and_explanation(schema_json, user_prompt, api_key)
+                    
+                    if not response_data or "code_to_execute" not in response_data:
+                        st.error("AIによるコード生成に失敗しました。")
+                        st.stop()
+
                     st.session_state.generated_code = response_data.get("code_to_execute", "")
                     st.session_state.analysis_explanation = response_data.get("analysis_explanation", "(説明が生成されませんでした)")
                     st.session_state.statistical_interpretation = response_data.get("statistical_interpretation", "")
-                    st.session_state.exec_output = None 
                     
-                    if st.session_state.generated_code:
-                        st.success("コードと解説が生成されました。Step 2で確認・実行してください。")
-                    else:
+                    if not st.session_state.generated_code:
                         st.error("AIは応答しましたが、実行可能なコードが含まれていませんでした。")
+                        st.stop()
 
-        st.markdown("---")
-        st.header("Step 2: コードの確認と実行")
-        if st.session_state.generated_code:
-            st.subheader("生成されたPythonコード")
-            st.code(st.session_state.generated_code, language="python")
-            
-            st.warning("AIが生成したコードが意図通りか確認してから実行してください。")
-            
-            if st.button("▶️ このコードを実行する"):
-                with st.spinner("サーバー上でコードを実行中..."):
+                    # 2. コード実行
                     try:
-                        # 実行環境にライブラリを渡す
                         global_vars = {"pd": pd, "px": px, "go": go}
                         if JANOME_AVAILABLE:
                             global_vars["Tokenizer"] = Tokenizer
@@ -274,17 +267,19 @@ if st.session_state.df is not None:
                         
                         if output is not None:
                             st.session_state.exec_output = output
-                            st.success("コードが実行されました。Step 3で結果を確認してください。")
+                            st.success("分析が実行されました。Step 2で結果を確認してください。")
                         else:
+                            st.session_state.exec_output = None
                             st.error("コードは実行されましたが、'output' 変数に結果が見つかりませんでした。")
                             
                     except Exception as e:
-                        st.error(f"コードの実行に失敗しました: {e}")
-        else:
-            st.info("Step 1でコードを生成してください。")
+                        st.session_state.exec_output = None
+                        st.error(f"コードの実行に失敗しました: {e}\n{traceback.format_exc()}")
 
         st.markdown("---")
-        st.header("Step 3: 実行結果と分析の解説")
+        
+        # (UX CHANGE) Step 2 を「実行結果」に変更
+        st.header("Step 2: 実行結果と分析の解説")
         
         if st.session_state.analysis_explanation:
             st.subheader("分析内容の解説（論文の「方法」用）")
@@ -341,8 +336,12 @@ if st.session_state.df is not None:
                 st.subheader("実行結果 (その他)")
                 st.write(output)
         else:
-            st.info("Step 2でコードを実行してください。")
+            st.info("Step 1で分析指示を出し、「分析を実行」ボタンを押してください。")
 
+        # (UX CHANGE) 実行されたコードは、結果の下に折りたたんで表示
+        if st.session_state.generated_code:
+            with st.expander("今回実行されたPythonコードを表示"):
+                st.code(st.session_state.generated_code, language="python")
 
     # --- 右カラム (col2): データ参照（プレビューとスキーマ） ---
     with col2:
