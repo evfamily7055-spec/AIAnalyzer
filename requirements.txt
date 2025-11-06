@@ -7,4 +7,3 @@ kaleido
 janome
 scipy
 statsmodels
-chromium
