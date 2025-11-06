@@ -2,3 +2,8 @@ streamlit
 pandas
 openpyxl
 google-generativeai
+plotly
+kaleido
+janome
+scipy
+statsmodels
