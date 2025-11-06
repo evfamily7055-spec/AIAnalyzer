@@ -4,4 +4,6 @@ pandas
 openpyxl
 plotly
 kaleido
-
+janome
+scipy
+statsmodels
