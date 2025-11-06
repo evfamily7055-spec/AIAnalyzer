@@ -9,7 +9,7 @@ from google.api_core import exceptions as google_exceptions
 import plotly.express as px
 import plotly.graph_objects as go
 
-# (NEW) 日本語テキストマイニング（形態素解析）ライブラリ
+# 日本語テキストマイニング（形態素解析）ライブラリ
 try:
     from janome.tokenizer import Tokenizer
     from janome.tokenfilter import POSKeepFilter, TokenCountFilter
@@ -17,14 +17,25 @@ try:
     JANOME_AVAILABLE = True
 except ImportError:
     JANOME_AVAILABLE = False
+    # st.error("Janomeライブラリが見つかりません。テキストマイニング機能は無効です。")
+
+# (NEW) 統計的仮説検定ライブラリ
+try:
+    from scipy import stats
+    import statsmodels.api as sm
+    STATS_LIBS_AVAILABLE = True
+except ImportError:
+    STATS_LIBS_AVAILABLE = False
+    # st.error("ScipyまたはStatsmodelsが見つかりません。統計検定機能は無効です。")
+
 
 # --- 定数 (Constants) ---
 MAX_UNIQUE_VALUES_FOR_SCHEMA = 20
 
 # --- ページ設定 (Page Config) ---
 st.set_page_config(layout="wide")
-st.title("AIデータアナリスト (NLP・解説対応) 🔬")
-st.info("集計・可視化・テキストマイニングを実行し、論文用の「分析内容の解説」もAIが自動生成します。")
+st.title("AIデータアナリスト (統計検定・NLP・解説対応) 🔬")
+st.info("集計・可視化・テキストマイニング・統計検定を実行し、論文用の「分析内容の解説」もAIが自動生成します。")
 
 # --- セッションステートの初期化 (Initialize Session State) ---
 if 'df' not in st.session_state:
@@ -35,16 +46,18 @@ if 'generated_code' not in st.session_state:
     st.session_state.generated_code = "" 
 if 'exec_output' not in st.session_state:
     st.session_state.exec_output = None 
-# (NEW) 分析内容の説明文を保存
 if 'analysis_explanation' not in st.session_state:
     st.session_state.analysis_explanation = "" 
+# (NEW) 統計的解釈を保存
+if 'statistical_interpretation' not in st.session_state:
+    st.session_state.statistical_interpretation = ""
 
 # --- Gemini API 呼び出し関数 ---
 @st.cache_data(ttl=600) 
 def generate_code_and_explanation(schema_json: str, user_prompt: str, api_key: str):
     """
     (NEW) 拡張スキーマと指示をGeminiに送信し、
-    「コード」と「分析内容の日本語説明」を含むJSONを生成する。
+    「コード」「分析説明」「統計的解釈」を含むJSONを生成する。
     """
     try:
         genai.configure(api_key=api_key)
@@ -52,40 +65,50 @@ def generate_code_and_explanation(schema_json: str, user_prompt: str, api_key: s
         st.error(f"APIキーの設定に失敗しました: {e}")
         return None
 
-    # (NEW) AIへの指示（システムプロンプト）をJSON出力・NLP対応に超強化
+    # (NEW) AIへの指示（システムプロンプト）をJSON出力・NLP・統計検定対応に超強化
     system_prompt = (
-        "あなたは、Pandas, Plotly (px), Janome (日本語形態素解析) を専門とする世界クラスのPythonデータアナリストです。"
-        "あなたの仕事は、渡された「データスキーマ」と「ユーザーの曖昧な指示」から、「実行コード」と「そのコードの分析内容の日本語説明」の2つを *JSON形式* で生成することです。"
+        "あなたは、Pandas, Plotly (px), Janome (NLP), Scipy (stats), Statsmodels (sm) を専門とする世界クラスのPythonデータアナリストです。"
+        "あなたの仕事は、渡された「データスキーマ」と「ユーザーの曖昧な指示」から、「実行コード」「分析内容の日本語説明」「統計的解釈」の3つを *JSON形式* で生成することです。"
         
         "## ルール:"
         "1. 出力は *必ず* 以下のJSON形式の *文字列のみ* としてください。説明やマークダウン（```json など）は絶対に含めないでください。"
         "   {\n"
         "     \"code_to_execute\": \"... (ここにPythonコードスニペットを記述) ...\",\n"
-        "     \"analysis_explanation\": \"... (ここに分析内容の日本語説明を記述) ...\"\n"
+        "     \"analysis_explanation\": \"... (ここに分析内容の日本語説明を記述) ...\",\n"
+        "     \"statistical_interpretation\": \"... (ここに統計検定の結果の解釈を記述) ...\"\n"
         "   }\n"
         
         "2. `code_to_execute` のルール:"
         "   - 入力データフレームは *常に* `df` という名前です。"
-        "   - ユーザーの指示から、データ集計 (Pandas), グラフ描画 (Plotly Express as px), テキストマイニング (Janome) のどれが最適か *推論* してください。"
-        "   - コードの *最終行* は、集計結果（DataFrame, Series, Plotly Figure）を `output` という単一の変数に *必ず* 代入してください。"
-        "   - （例: `output = df.groupby('Gender')['Age'].mean()`）"
-        "   - （例: `output = px.scatter(df, x='Age', y='Income')`）"
+        "   - ユーザーの指示から、集計(Pandas), グラフ(Plotly as px), NLP(Janome), 統計検定(scipy.stats as stats, statsmodels.api as sm) のどれが最適か *推論* してください。"
+        "   - コードの *最終行* は、結果（DataFrame, Series, Plotly Figure, または検定結果の文字列/DataFrame）を `output` という単一の変数に *必ず* 代入してください。"
         "   - `print()` や `fig.show()` 文は *絶対に* 使わないでください。"
         
         "3. `analysis_explanation` のルール:"
-        "   - `code_to_execute` で実行する分析が *何をしているか* を、学術論文の「方法」セクションで使えるような、客観的かつ簡潔な日本語で説明してください。"
+        "   - `code_to_execute` で実行する分析が *何をしているか* を、学術論文の「方法」セクションで使える、客観的かつ簡潔な日本語で説明してください。"
         "   - （例: 「'Gender' 列をグループ化キーとし、'Age' 列の平均値を算出した。」）"
         "   - （例: 「'Age' 列をX軸、'Income' 列をY軸とする散布図を作成し、両変数の関係性を可視化した。」）"
 
-        "4. (NEW) 日本語テキストマイニングの指示（例: 「自由回答を分析」「単語頻度」）の場合:"
-        "   - スキーマから `object` 型でユニーク値が多いテキスト列を推論してください。"
-        "   - `janome.tokenizer.Tokenizer` を使って形態素解析を行ってください。"
-        "   - 分析対象は *名詞*, *動詞*, *形容詞* の *原形* としてください（`token.base_form` と `token.part_of_speech.startswith` を使用）。"
-        "   - `stop_words` (例: 'する', 'ある', 'ない', 'こと', 'もの') を定義し、除外してください。"
-        "   - 単語頻度をカウントし、上位50件を `pd.DataFrame(..., columns=['word', 'count'])` に格納してください。"
-        "   - 最後に `px.treemap` を使用し、`path=[px.Constant('all'), 'word']`, `values='count'` で結果をツリーマップとして可視化し、それを `output` に代入してください。"
+        "4. (NEW) `statistical_interpretation` のルール:"
+        "   - *統計検定を実行した場合のみ*、その結果（p値、統計量など）を論文の「結果」セクションで使えるように日本語で解釈してください。"
+        "   - （例: 「t検定の結果、p値は0.03であり、5%水準で有意な差が認められた。」）"
+        "   - （例: 「相関分析の結果、r=0.75, p<0.01 であり、強い正の相関が認められた。」）"
+        "   - *統計検定でない場合（単純集計やグラフ描画）は、このフィールドは空文字列 \"\" としてください。*"
+
+        "5. (NEW) 統計検定の指示（例: 「差があるか検定」「関連を分析」「相関を調べて」）の場合:"
+        "   - スキーマ（データ型、ユニーク値の数）に基づき、最適な検定手法を *自動で選択* してください。"
+        "   - (A) 2つの数値変数の関係性 -> 相関分析 (`stats.pearsonr`)。結果は `r, p = stats.pearsonr(...)` とし、`output = f'相関係数(r): {r:.4f}, p値: {p:.4g}'` のように文字列で返してください。"
+        "   - (B) カテゴリ変数(2群) vs 数値変数 -> 独立2群のt検定 (`stats.ttest_ind`)。結果は `stat, p = stats.ttest_ind(...)` とし、`output = f't値: {stat:.4f}, p値: {p:.4g}'` で返してください。"
+        "   - (C) 2つのカテゴリ変数の関係性 -> カイ二乗検定 (`stats.chi2_contingency`)。`pd.crosstab` でクロス表を作成し、`chi2, p, dof, ex = stats.chi2_contingency(crosstab)` を実行。`output = f'カイ二乗値: {chi2:.4f}, p値: {p:.4g}, 自由度: {dof}'` で返してください。"
+        "   - (D) 1つの数値変数 (X) から 1つの数値変数 (Y) を予測 -> 単回帰分析 (`sm.OLS`)。`X = sm.add_constant(df['X'])`, `model = sm.OLS(df['Y'], X).fit()`, `output = model.summary().as_text()` で *サマリー全体を文字列として* 返してください。"
         
-        "5. 曖昧な指示（例: '男女別'）は、スキーマの `unique_values` などを参照し、*積極的に推論* してください。"
+        "6. (NLP) 日本語テキストマイニングの指示（例: 「自由回答を分析」「単語頻度」）の場合:"
+        "   - `janome.tokenizer.Tokenizer` を使用。分析対象は *名詞*, *動詞*, *形容詞* の *原形* としてください。"
+        "   - `stop_words` (例: 'する', 'ある', 'ない', 'こと', 'もの') を定義し、除外。"
+        "   - 単語頻度をカウントし、上位50件を `pd.DataFrame(..., columns=['word', 'count'])` に格納。"
+        "   - 最後に `px.treemap` を使用し、`path=[px.Constant('all'), 'word']`, `values='count'` で結果を可視化し、それを `output` に代入。"
+        
+        "7. 曖昧な指示（例: '男女別'）は、スキーマの `unique_values` などを参照し、*積極的に推論* してください。"
     )
 
 
@@ -125,6 +148,8 @@ with st.sidebar:
     st.info("このアプリは実データをAIに送信しません。AIには列名とカテゴリのユニーク値（20種類以下）のみが送信されます。")
     if not JANOME_AVAILABLE:
         st.error("Janomeライブラリが見つかりません。テキストマイニング機能は無効です。\n`pip install janome` を実行してください。")
+    if not STATS_LIBS_AVAILABLE:
+        st.error("ScipyまたはStatsmodelsが見つかりません。統計検定機能は無効です。\n`pip install scipy statsmodels` を実行してください。")
 
 
 # --- 1. ファイルアップローダー ---
@@ -157,9 +182,11 @@ if uploaded_file:
         
         st.success("ファイルの読み込みが完了しました。")
         
+        # 状態をリセット
         st.session_state.generated_code = ""
         st.session_state.exec_output = None 
         st.session_state.analysis_explanation = ""
+        st.session_state.statistical_interpretation = ""
 
     except Exception as e:
         st.error(f"Excelファイルの読み込みに失敗しました: {e}")
@@ -182,7 +209,9 @@ if st.session_state.df is not None:
             placeholder=(
                 "（集計例）: 「男女別の年齢の平均値」\n"
                 "（可視化例）: 「'年齢' と '給与' の散布図を表示」\n"
-                "（NLP例）: 「'自由回答' 列の単語頻度を可視化」"
+                "（NLP例）: 「'自由回答' 列の単語頻度を可視化」\n"
+                "（検定例）: 「'介入群' と '対照群' で 'スコア' に差があるか検定」\n"
+                "（検定例）: 「'年齢' と '給与' の相関を分析して」"
             ),
             height=150
         )
@@ -192,10 +221,14 @@ if st.session_state.df is not None:
                 st.error("サイドバーからGemini APIキーを入力してください。")
             elif not user_prompt:
                 st.warning("指示を入力してください。")
-            elif "テキストマイニング" in user_prompt or "単語" in user_prompt:
-                 if not JANOME_AVAILABLE:
-                     st.error("テキストマイニングにはJanomeライブラリが必要です。サイドバーのエラーメッセージを確認してください。")
-                     st.stop()
+            
+            # ライブラリチェック
+            elif ("テキスト" in user_prompt or "単語" in user_prompt or "NLP" in user_prompt) and not JANOME_AVAILABLE:
+                 st.error("テキストマイニングにはJanomeライブラリが必要です。サイドバーのエラーメッセージを確認してください。")
+                 st.stop()
+            elif ("検定" in user_prompt or "分析" in user_prompt or "差" in user_prompt or "関連" in user_prompt or "相関" in user_prompt) and not STATS_LIBS_AVAILABLE:
+                 st.error("統計検定にはScipyとStatsmodelsが必要です。サイドバーのエラーメッセージを確認してください。")
+                 st.stop()
             
             with st.spinner("AIがコードと解説を生成中です..."):
                 schema_json = json.dumps(st.session_state.schema_dict, indent=2, ensure_ascii=False)
@@ -203,9 +236,10 @@ if st.session_state.df is not None:
                 response_data = generate_code_and_explanation(schema_json, user_prompt, api_key)
                 
                 if response_data:
-                    # (NEW) コードと説明文を別々に保存
+                    # (NEW) 3つの情報を別々に保存
                     st.session_state.generated_code = response_data.get("code_to_execute", "")
                     st.session_state.analysis_explanation = response_data.get("analysis_explanation", "(説明が生成されませんでした)")
+                    st.session_state.statistical_interpretation = response_data.get("statistical_interpretation", "")
                     st.session_state.exec_output = None 
                     
                     if st.session_state.generated_code:
@@ -224,13 +258,16 @@ if st.session_state.df is not None:
             if st.button("▶️ このコードを実行する"):
                 with st.spinner("サーバー上でコードを実行中..."):
                     try:
-                        # (NEW) 実行環境にJanomeも渡す
+                        # (NEW) 実行環境にJanomeと統計ライブラリも渡す
                         global_vars = {"pd": pd, "px": px, "go": go}
                         if JANOME_AVAILABLE:
                             global_vars["Tokenizer"] = Tokenizer
                             global_vars["Analyzer"] = Analyzer
                             global_vars["POSKeepFilter"] = POSKeepFilter
                             global_vars["TokenCountFilter"] = TokenCountFilter
+                        if STATS_LIBS_AVAILABLE:
+                            global_vars["stats"] = stats
+                            global_vars["sm"] = sm
                             
                         local_vars = {"df": st.session_state.df.copy()} 
                         
@@ -252,10 +289,14 @@ if st.session_state.df is not None:
         st.markdown("---")
         st.header("Step 3: 実行結果と分析の解説")
         
-        # (NEW) まず分析内容の解説を表示
+        # (NEW) 2種類の解説を表示
         if st.session_state.analysis_explanation:
-            st.subheader("分析内容の解説（論文用）")
+            st.subheader("分析内容の解説（論文の「方法」用）")
             st.success(f"📄 {st.session_state.analysis_explanation}")
+        
+        if st.session_state.statistical_interpretation:
+            st.subheader("統計的解釈（論文の「結果」用）")
+            st.info(f"📈 {st.session_state.statistical_interpretation}")
         
         if st.session_state.exec_output is not None:
             
@@ -294,7 +335,12 @@ if st.session_state.df is not None:
                 except Exception as e:
                     st.warning(f"画像のエクスポートに失敗しました (ローカル環境では動作します): {e}")
 
-            # 3. その他の結果
+            # 3. (NEW) 結果が統計サマリー (文字列) の場合
+            elif isinstance(output, str):
+                st.subheader("分析・検定結果 (サマリー)")
+                st.text(output) # OLSサマリーなどを等幅フォントで表示
+            
+            # 4. その他の結果
             else:
                 st.subheader("実行結果 (その他)")
                 st.write(output)
